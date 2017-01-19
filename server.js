@@ -10,6 +10,7 @@ var store = {
 };
 
 http.createServer(function(req, res) {
+	res.setHeader("Access-Control-Allow-Origin", "*");
 	if (req.url === '/playlistOfTheMonth') {
 		res.end('January2017');
 	} else if (req.url === '/health') {
