@@ -125,8 +125,10 @@ function refreshTokenHandler(refreshToken, req, res, callback) {
     if (response.statusCode === 200) {
       onResponse(response, callback);
     } else {
-      res.writeHead(response.statusCode);
-      res.end(response.statusMessage);
+      if (res) {
+        res.writeHead(response.statusCode);
+        res.end(response.statusMessage);  
+      }
       callback(new Error('Something went wrong refreshing'));
     }
   });
@@ -134,6 +136,22 @@ function refreshTokenHandler(refreshToken, req, res, callback) {
   refreshReq.on('error', callback);
   refreshReq.write(postData);
   refreshReq.end();
+}
+
+function setRefresh(expiresIn) {
+  setTimeout(function() {
+    redisClient.get('refresh_token', function(err, refresh_token) {
+      if (err) return console.log(err);
+
+      refreshTokenHandler(refresh_token, null, null, function(err, authRaw) {
+        if (err) return console.log(err);
+
+        var auth = JSON.parse(authRaw);
+        redisClient.set('access_token', auth.access_token, redis.print);
+        setRefresh(expiresIn);
+      });
+    });
+  }, expiresIn * 1000);
 }
 
 function onRequest(req, res) {
@@ -210,6 +228,8 @@ function onRequest(req, res) {
 
       redisClient.set('access_token', auth.access_token, redis.print);
       redisClient.set('refresh_token', auth.refresh_token, redis.print);
+
+      setRefresh(auth.expires_in);
 
       res.writeHead(200);
       res.end('Auth completed!');
