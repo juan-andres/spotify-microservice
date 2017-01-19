@@ -1,10 +1,22 @@
 try {
-	require('./env');
+  require('./env'); // Only works for Dev
 } catch(e) {}
 
 var http = require('http'); // Needed for dev, maybe remove it for prod
 var https = require('https');
 var url = require('url');
+var cookie = require('cookie');
+var async = require('async');
+
+// redis
+// brew install redis
+// ln -sfv /usr/local/opt/redis/*.plist ~/Library/LaunchAgents
+// launchctl load ~/Library/LaunchAgents/homebrew.mxcl.redis.plist
+var redis = require('redis');
+var redisClient = redis.createClient(process.env.REDIS_URL);
+redisClient.on('error', function (err) { console.log('Error', err); });
+redisClient.set('user_id', 'juanandresnyc', redis.print);
+redisClient.set('playlist_id', '6OGpFu61I7Ylxj4AvkCavd', redis.print); // January 2017
 
 var client_id = process.env.CLIENT_ID;
 var client_secret = process.env.CLIENT_SECRET;
@@ -12,155 +24,217 @@ var redirect_uri = process.env.REDIRECT_URI;
 
 // Datastore lol
 var STORE = {
-	access_token: '',
-	refresh_token: '',
-	playlist: null,
-	last_requested: '',
-	playlist_id: '6OGpFu61I7Ylxj4AvkCavd', // January 2017
-	user_id: 'juanandresnyc'
-
+  playlist: null
 };
 
-var REQUEST_PLAYLIST_INTERVAL = 3600;
+var REQUEST_PLAYLIST_INTERVAL = 1000 * 60 * 5; // every 5 mins
 
-function onToken(serverRes, resToken) {
-  	if (resToken.statusCode === 200) {
-
-	  	var body = '';
-	  	resToken.setEncoding('utf8');
-	  	resToken.on('data', function(chunk) { body += chunk; });
-	  	resToken.on('end', function() {
-
-	  		body = JSON.parse(body);
-
-	  		STORE.access_token = body.access_token;
-		  	STORE.refresh_token = body.refresh_token;
-
-		  	requestPlaylist(serverRes);
-	  	});
-	  	resToken.on('error', function(err) {
-	  		console.log(err);
-	  		serverRes.end('issues with token response');
-	  	})
-
-	} else {
-		// Issues with token response
-		serverRes.writeHead(serverRes.statusCode);
-		serverRes.end(serverRes.statusMessage);
-	}
+function onResponse(response, callback) {
+  var body = [];
+  response.on('data', function(chunk) { body.push(chunk); });
+  response.on('error', callback);
+  response.on('end', function() {
+    callback(null, Buffer.concat(body).toString())
+  });
 }
 
-function onPlaylist(serverRes, playlistRes) {
-	if (playlistRes.statusCode !== 200) {
-		serverRes.writeHead(playlistRes.statusCode);
-		return serverRes.end(playlistRes.statusMessage);
-	}
+function requestPlaylist(userId, playlistId, accessToken, req, res, callback) {
 
-	var body = '';
-	playlistRes.setEncoding('utf8');      
-  	playlistRes.on('data', function(chunk) { body += chunk; });
+  var options = {
+    hostname: 'api.spotify.com',
+    path: '/v1/users/' + userId + '/playlists/' + playlistId,
+    headers: {
+      'Authorization': 'Bearer ' + accessToken,
+      'Content-Type': 'application/json',
+    }
+  };
 
-  	playlistRes.on('error', function(err) {
-  		console.log(err);
-  		serverRes.end('Something went wrong getting the playlist');
-  	});
+  https.get(options, function(response) {
+    if (response.statusCode === 200) {
+      onResponse(response, callback);
+    } else {
+      res.writeHead(response.statusCode);
+      res.end(response.statusMessage);
+      callback(new Error('Something went wrong requesting the playlist'));
+    }
+  });
+};
 
-  	playlistRes.on('end', function() {
-  		STORE.playlist = body;
-  		serverRes.setHeader('Content-Type', 'application/json');
-  		serverRes.end(STORE.playlist);
-  	});
-}
+function callbackHandler(code, state, req, res, callback) {
+  var cookies = cookie.parse(req.headers.cookie);
+  var storedState = cookies ? cookies['spotify-cookie-key'] : null;
 
+  if (state === null || state !== storedState) {
+    res.writeHead(301, {'Location': '/#error=state_mismatch'});
+    res.end();
+  } else {
+    res.setHeader('Set-Cookie', 'spotify-cookie-key=cleared'); // TODO Test this clearing
 
-function requestPlaylist(serverRes) {
-	var options = {
-      hostname: 'api.spotify.com',
-      path: '/v1/users/' + STORE.user_id + '/playlists/' + STORE.playlist_id,
+    var postData = url.format(
+      'code=' + code +
+      '&redirect_uri=' + redirect_uri +
+      '&grant_type=authorization_code'
+    );
+
+    var authOptions = {
+      method: 'POST',
+      hostname: 'accounts.spotify.com',
+      path: '/api/token',
       headers: {
-      	'Authorization': 'Bearer ' + STORE.access_token,
-      	'Content-Type': 'application/json',
+        'Authorization': 'Basic ' + (new Buffer(client_id + ':' + client_secret).toString('base64')),
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': postData.length
       }
     };
 
-    https.get(options, onPlaylist.bind(null, serverRes));
+    var authReq = https.request(authOptions, function(response) {
+      if (response.statusCode === 200) {
+        onResponse(response, callback);
+      } else {
+        res.writeHead(response.statusCode);
+        res.end(response.statusMessage);
+        callback(new Error('Something went wrong authenticating'));
+      }
+    });
+
+    authReq.on('error', callback);
+    authReq.write(postData);
+    authReq.end();
+  }
 }
 
-http.createServer(function(req, res) {
-	res.setHeader("Access-Control-Allow-Origin", "*");
+function refreshTokenHandler(refreshToken, req, res, callback) {
+  console.log('refreshing', refreshToken, STORE);
+  var postData = url.format(
+    'grant_type=refresh_token' +
+    '&refresh_token=' + refreshToken
+  );
 
-	var urlObj = url.parse(req.url, true);
-	var pathname = urlObj.pathname;
+  var authOptions = {
+    method: 'POST',
+    hostname: 'accounts.spotify.com',
+    path: '/api/token',
+    headers: { 
+      'Authorization': 'Basic ' + (new Buffer(client_id + ':' + client_secret).toString('base64')),
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Content-Length': postData.length
+    }
+  };
 
-	if (pathname === '/playlistOfTheMonth') {
+  var refreshReq = https.request(authOptions, function(response) {
+    if (response.statusCode === 200) {
+      onResponse(response, callback);
+    } else {
+      res.writeHead(response.statusCode);
+      res.end(response.statusMessage);
+      callback(new Error('Something went wrong refreshing'));
+    }
+  });
 
-		if (STORE.playlist) {
-			console.log('GETTING OLD DATA');
-			res.end(STORE.playlist);
-		} else {
-			requestPlaylist(res);
-		}
-		// if (STORE.playlist || (last_requested && Date.now() - last_requested < REQUEST_PLAYLIST_INTERVAL)) {
-		// 	res.end(playlist);
-		// } else {
-			// Get Playlist	
-			// requestPlaylist(res);
-		// }
+  refreshReq.on('error', callback);
+  refreshReq.write(postData);
+  refreshReq.end();
+}
 
-	} else if (pathname === '/health') {
-		res.end('Alive!'); // TODO
-	} else if (pathname === '/login') {
+function onRequest(req, res) {
+  // We need this for github.io to call our heroku app
+  res.setHeader("Access-Control-Allow-Origin", "*"); 
+  var urlObj = url.parse(req.url, true);
+  
+  switch (urlObj.pathname) {
+  case '/playlistOfTheMonth':
+    async.parallel([
+      function(next) { redisClient.get('last_requested', next); },
+      function(next) { redisClient.get('user_id', next); },
+      function(next) { redisClient.get('playlist_id', next); },
+      function(next) { redisClient.get('access_token', next); }
+    ], function(err, results) {
+      if (err) {
+        console.log(err);
+        res.writeHead(400);
+        res.end('Issues with redis');
+        return;
+      }
 
-		var state = 'state_' + (Math.random()*10000).toString();
-		var scope = '';
-		res.setHeader('cookie', 'spotify-cookie-key=' + state);
-		res.writeHead(301, {Location: url.format('https://accounts.spotify.com/authorize?' +  
-		    'response_type=code' +
-		    '&client_id=' + client_id +
-		    '&scope=' + scope +
-		    '&redirect_uri=' + redirect_uri,
-		    '&state=' + state
-		)});
-		res.end();
+      if (results[0] && STORE.playlist &&  (new Date() - new Date(results[0]) < REQUEST_PLAYLIST_INTERVAL) ) {
+        res.setHeader('Content-Type', 'application/json');
+        res.end(STORE.playlist);
+      } else {
+        requestPlaylist(results[1], results[2], results[3], req, res, function(err, playlistRaw) {
+          if (err) {
+            console.log(err);
+            return;
+          }
 
-	} else if (pathname === '/callback') {
-		var code = urlObj.query.code || null;
-		var state = urlObj.query.state || null;
-		var storedState = req.cookies ? req.cookies['spotify-cookie-key'] : null;
+          redisClient.set('last_requested', new Date().toISOString(), redis.print);
+          STORE.playlist = playlistRaw;
 
-		if (false && (state === null || state !== storedState)) {
-			res.writeHead(301, {Location: '/#error=state_mismatch'});
-			res.end();
-		} else {
-			res.setHeader('cookie', '');
+          res.setHeader('Content-Type', 'application/json');
+          res.end(STORE.playlist);
+        }); 
+      }
 
-			var postData = url.format('code=' + code +
-				'&redirect_uri=' + redirect_uri +
-				'&grant_type=authorization_code');
+    });
+    break;
+  case '/health':
+    res.writeHead(200);
+    res.end(STORE.playlist ? 'Good' : 'Ughhhhh');
+    break;
+  case '/login':
+    var state = 'state_' + (Math.random()*10000).toString();
+    var scope = ''; // For a given playlist, no scope is needed
+    var authUrl = url.format(
+      'https://accounts.spotify.com/authorize?' +  
+      'response_type=code' +
+      '&client_id=' + client_id +
+      '&scope=' + scope +
+      '&redirect_uri=' + redirect_uri +
+      '&state=' + state
+    );
+    res.writeHead(301, {
+      'Location': authUrl,
+      'Set-Cookie': 'spotify-cookie-key=' + state
+    });
+    res.end();
+    break;
+  case '/callback':
+    var code = urlObj.query.code || null;
+    var state = urlObj.query.state || null;
+    callbackHandler(code, state, req, res, function(err, authRaw) {
+      if (err) {
+        console.log(err);
+        return;
+      }
+      
+      var auth = JSON.parse(authRaw);
 
-			var authOptions = {
-				method: 'POST',
-				hostname: 'accounts.spotify.com',
-				path: '/api/token',
-				headers: {
-					'Authorization': 'Basic ' + (new Buffer(client_id + ':' + client_secret).toString('base64')),
-					'Content-Type': 'application/x-www-form-urlencoded',
-    				'Content-Length': postData.length
-				}
-			};
+      redisClient.set('access_token', auth.access_token, redis.print);
+      redisClient.set('refresh_token', auth.refresh_token, redis.print);
 
-			var tokenReq = https.request(authOptions, onToken.bind(null, res));
+      res.writeHead(200);
+      res.end('Auth completed!');
+    });
+    break;
+  case '/refresh_token':
+    redisClient.get('refresh_token', function(err, refresh_token) {
+      if (err) return console.log(err);
 
-			tokenReq.on('error', function(err) {
-				console.log(err);
-				res.end('Error getting the token');
-			});
+      refreshTokenHandler(urlObj.query.refresh_token || refresh_token, req, res, function(err, authRaw) {
+        if (err) return console.log(err);
 
-			tokenReq.write(postData);
-			tokenReq.end();
-		}
-	} else {
-		res.writeHead(400);
-		res.end('Bad Request');
-	}
-}).listen(process.env.PORT || 8888);
+        var auth = JSON.parse(authRaw);
+        redisClient.set('access_token', auth.access_token, redis.print);
+        res.writeHead(200);
+        res.end('Auth refresh completed!');
+      });
+    });
+    break;
+  default:
+    res.writeHead(400);
+    res.end('Bad Request');
+  }
+}
+
+http
+  .createServer(onRequest)
+  .listen(process.env.PORT || 8888);
