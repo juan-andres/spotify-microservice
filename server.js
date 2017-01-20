@@ -8,6 +8,12 @@ var url = require('url');
 var cookie = require('cookie');
 var async = require('async');
 
+var client_id = process.env.CLIENT_ID;
+var client_secret = process.env.CLIENT_SECRET;
+var redirect_uri = process.env.REDIRECT_URI;
+var user_id = process.env.USER_ID;
+var playlist_id = process.env.PLAYLIST_ID;
+
 // redis
 // brew install redis
 // ln -sfv /usr/local/opt/redis/*.plist ~/Library/LaunchAgents
@@ -15,13 +21,9 @@ var async = require('async');
 var redis = require('redis');
 var redisClient = redis.createClient(process.env.REDIS_URL);
 redisClient.on('error', function (err) { console.log('Error', err); });
-redisClient.set('user_id', 'juanandresnyc', redis.print);
-redisClient.set('playlist_id', '6OGpFu61I7Ylxj4AvkCavd', redis.print); // January 2017
+redisClient.set('user_id', user_id, redis.print);
+redisClient.set('playlist_id', playlist_id, redis.print); // January 2017
 redisClient.set('last_refresh', new Date().toISOString(), redis.print);
-
-var client_id = process.env.CLIENT_ID;
-var client_secret = process.env.CLIENT_SECRET;
-var redirect_uri = process.env.REDIRECT_URI;
 
 // Datastore lol
 var STORE = {
