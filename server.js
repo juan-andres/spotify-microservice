@@ -17,6 +17,7 @@ var redisClient = redis.createClient(process.env.REDIS_URL);
 redisClient.on('error', function (err) { console.log('Error', err); });
 redisClient.set('user_id', 'juanandresnyc', redis.print);
 redisClient.set('playlist_id', '6OGpFu61I7Ylxj4AvkCavd', redis.print); // January 2017
+redisClient.set('last_refresh', new Date().toISOString(), redis.print);
 
 var client_id = process.env.CLIENT_ID;
 var client_secret = process.env.CLIENT_SECRET;
@@ -28,6 +29,26 @@ var STORE = {
 };
 
 var REQUEST_PLAYLIST_INTERVAL = 1000 * 60 * 5; // every 5 mins
+
+setInterval(function automaticRefresh() {
+  async.parallel([
+    function (next) { redisClient.get('last_refresh', next); },
+    function (next) { redisClient.get('expires_in', next); },
+    function (next) { redisClient.get('refresh_token', next); }
+  ], function(err, results) {
+      if (err) return;
+      var diff = new Date() - new Date(results[0]);
+      if (diff > (results[1] * 1000)) {
+        refreshTokenHandler(results[2], null, null, function(err, authRaw) {
+          if (err) return console.log(err);
+
+          console.log('refreshed access token!');
+          var auth = JSON.parse(authRaw);
+          redisClient.set('access_token', auth.access_token, redis.print);
+        });
+      }
+  });
+}, 1000 * 60 * 1); // every 10 minutes
 
 function onResponse(response, callback) {
   var body = [];
@@ -138,22 +159,6 @@ function refreshTokenHandler(refreshToken, req, res, callback) {
   refreshReq.end();
 }
 
-function setRefresh(expiresIn) {
-  setTimeout(function() {
-    redisClient.get('refresh_token', function(err, refresh_token) {
-      if (err) return console.log(err);
-
-      refreshTokenHandler(refresh_token, null, null, function(err, authRaw) {
-        if (err) return console.log(err);
-
-        var auth = JSON.parse(authRaw);
-        redisClient.set('access_token', auth.access_token, redis.print);
-        setRefresh(expiresIn);
-      });
-    });
-  }, expiresIn * 1000);
-}
-
 function onRequest(req, res) {
   // We need this for github.io to call our heroku app
   res.setHeader("Access-Control-Allow-Origin", "*"); 
@@ -228,8 +233,8 @@ function onRequest(req, res) {
 
       redisClient.set('access_token', auth.access_token, redis.print);
       redisClient.set('refresh_token', auth.refresh_token, redis.print);
-
-      setRefresh(auth.expires_in);
+      redisClient.set('last_refresh', new Date().toISOString(), redis.print);
+      redisClient.set('expires_in', auth.expires_in, redis.print);
 
       res.writeHead(200);
       res.end('Auth completed!');
