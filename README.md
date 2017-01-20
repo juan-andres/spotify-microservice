@@ -2,17 +2,18 @@
 
 #### Prerequisites
 Need a spotify account (free account is fine!)
-	- Get Client ID
-	- Get Client Secret
-	- Set Redirect URL (herokuappurl/callback)
+- Get Client ID
+- Get Client Secret
+- Set Redirect URL (herokuappurl/callback)
+
 Need a heroku app (free account as well!) (Needs providing credit card info to use redis for free!)
-	- Set the environment
-		- CLIENT_ID // from spotify app
-		- CLIENT_SECRET // from spotify app
-		- REDIRECT_URI // herokuappurl/callback
-		- USER_ID // Your spotify user id
-		- PLAYLIST_ID // Right click on your favorite spotify playlist and get the uri, the Id is there 
-	- Install redis add-on
+- Set the environment
+  - CLIENT_ID // from spotify app
+  - CLIENT_SECRET // from spotify app
+  - REDIRECT_URI // herokuappurl/callback
+  - USER_ID // Your spotify user id
+  - PLAYLIST_ID // Right click on your favorite spotify playlist and get the uri, the Id is there
+- Install redis add-on
 
 #### Steps
 
@@ -32,4 +33,7 @@ Test whether things work
 heroku-app-url/playlistOfTheMonth
 ```
 
-Now you can use the endpoint heroku-app-url/playlistOfTheMonth in your app!
+Now you can use the endpoint **heroku-app-url/playlistOfTheMonth** in your app!
+
+### TODOs
+- Make it so only you can login your account (e.g. I can go to your login page and use my credentials and boot you out!)
